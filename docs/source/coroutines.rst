@@ -169,6 +169,81 @@ type of generator function that can be iterated with ``async for``:
 More details on this type of generator can be found in :pep:`525`.
 
 
+Calling blocking code
+=====================
+
+When interacting with hardware components through a software interface, a software abstraction layer
+or driver is typically responsible for communication.
+This interface often relies on low-level register read/write functions, which are blocking operations.
+This means they halt execution until the write completes or the read returns a result.
+
+However, since cocotb operates using coroutines and is inherently asynchronous, these blocking
+operations will prevent the simulator from advancing time, causing the read/write operations to
+stall indefinitely.
+
+To address this, cocotb provides two decorators: :func:`~cocotb.bridge` and :func:`~cocotb.resume`.
+
+    - The :func:`~cocotb.bridge` decorator converts a regular (non-coroutine) function into a blocking coroutine by running it in a separate execution thread.
+    - The :func:`~cocotb.resume` decorator enables a coroutine that consumes simulation time to be invoked by a regular thread.
+
+A typical call sequence may look like this:
+
+.. image:: diagrams/svg/blocking_code.svg
+
+By using the :func:`~cocotb.bridge` decorator when calling a synchronous function inside the software
+interface, a new excution thread is started where the synchronous code is executed.
+When calling the read/write functions in the software interface, the corresponding coroutine must be
+invoked using the :func:`~cocotb.resume` decorator.
+This approach allows the synchronous code to block in a separate thread while permitting the simulator
+to continue advancing time.
+
+The following code snippet demonstrates in a simple example how to do register read and write
+operations within cocotb from a synchronous conext:
+
+.. code-block:: python3
+
+    import cocotb
+    from cocotb.triggers import Timer
+    from cocotb.clock import Clock
+
+    async def async_read(dut):
+        """Read the register of the DUT."""
+
+        return dut.register_out.value
+
+    async def async_write(dut, value):
+        """Write the register of the DUT."""
+
+        dut.write_enable.value = 1
+        dut.register_in.value = value
+        await Timer(2, units="ns") # wait at least one clock period
+        dut.write_enable.value = 0
+
+    def sync_read(dut):
+        """Go back into the asynchronous context and read the register."""
+
+        return cocotb.resume(async_read)(dut)
+
+    def sync_write(dut, value):
+        """Go back into the asynchronous context and write the register."""
+
+        return cocotb.resume(async_write)(dut, value)
+
+    @cocotb.test()
+    async def test_synchronous_register_access(dut):
+        await cocotb.start(Clock(dut.clk, 1, units='ns').start())
+
+        write = random.randint(0, 255)
+        await cocotb.bridge(sync_write)(dut, write) # call synchronous function by using bridge()
+        await Timer(2, units="ns") # wait for the output of the register to toggle
+        result = await cocotb.bridge(sync_read)(dut)
+        assert write == result, f"read value {result} is not the written value {write}!"
+
+
+.. versionchanged:: 2.0
+    :func:`cocotb.bridge` renamed from ``cocotb.external``, :func:`cocotb.resume` renamed from ``cocotb.function``.
+
+
 .. _yield-syntax:
 
 Generator-based coroutines
